@@ -145,9 +145,7 @@ func ArticleSearchTool(ctx context.Context, cc *mcp.ServerSession, params *mcp.C
 				zap.String("doi", query),
 				zap.Error(err),
 			)
-			return &mcp.CallToolResultFor[any]{
-				Content: []mcp.Content{&mcp.TextContent{Text: "No paper found for DOI: " + query}},
-			}, nil
+			return nil, err
 		}
 
 		l.Info("DOI lookup completed", zap.String("doi", query))

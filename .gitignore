@@ -6,6 +6,16 @@ dist
 
 # Binaries
 /annas-mcp
+/*.exe
 
 # Environment file
 .env
+.env.*
+!.env.example
+
+# Local runtime data and verification artifacts
+/downloads/
+/diagnostics/
+/build-tools/
+*.log
+*profile*/

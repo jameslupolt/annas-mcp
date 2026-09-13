@@ -5,7 +5,6 @@ import (
 	"net/url"
 
 	"strings"
-	"sync"
 	"time"
 
 	"encoding/json"
@@ -28,7 +27,7 @@ const (
 	AnnasSciDBEndpointFormat    = "https://%s/scidb/%s"
 	AnnasDownloadEndpointFormat = "https://%s/dyn/api/fast_download.json?md5=%s&key=%s"
 	DefaultHTTPTimeout          = time.Hour
-	BrowserUserAgent            = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+	BrowserUserAgent            = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36"
 )
 
 var (
@@ -106,23 +105,15 @@ func sanitizeFilename(filename string) string {
 func FindBook(query string, timeout time.Duration) ([]*Book, error) {
 	l := logger.GetLogger()
 
-	// Use mutex to protect concurrent slice access
-	var bookListMutex sync.Mutex
 	bookList := make([]*colly.HTMLElement, 0)
 
-	c := colly.NewCollector(
-		colly.Async(true),
-		// Set realistic User-Agent to avoid DDoS-Guard blocking
-		colly.UserAgent(BrowserUserAgent),
-	)
-	c.SetRequestTimeout(timeout)
+	// Synchronous collection propagates HTTP failures through Visit.
+	c := newSearchCollector(timeout)
 
 	c.OnHTML("a[href^='/md5/']", func(e *colly.HTMLElement) {
 		// Only process the first link (the cover image link), not the duplicate title link
 		if e.Attr("class") == "custom-a block mr-2 sm:mr-4 hover:opacity-80" {
-			bookListMutex.Lock()
 			bookList = append(bookList, e)
-			bookListMutex.Unlock()
 		}
 	})
 
@@ -224,23 +215,14 @@ func FindBook(query string, timeout time.Duration) ([]*Book, error) {
 func FindArticle(query string, timeout time.Duration) ([]*Paper, error) {
 	l := logger.GetLogger()
 
-	// Use mutex to protect concurrent slice access
-	var paperListMutex sync.Mutex
 	paperList := make([]*colly.HTMLElement, 0)
 
-	c := colly.NewCollector(
-		colly.Async(true),
-		// Set realistic User-Agent to avoid DDoS-Guard blocking
-		colly.UserAgent(BrowserUserAgent),
-	)
-	c.SetRequestTimeout(timeout)
+	c := newSearchCollector(timeout)
 
 	c.OnHTML("a[href^='/md5/']", func(e *colly.HTMLElement) {
 		// Only process the first link (the cover image link), not the duplicate title link
 		if e.Attr("class") == "custom-a block mr-2 sm:mr-4 hover:opacity-80" {
-			paperListMutex.Lock()
 			paperList = append(paperList, e)
-			paperListMutex.Unlock()
 		}
 	})
 
@@ -354,7 +336,7 @@ func (b *Book) Download(secretKey, folderPath string, timeout time.Duration) err
 
 	resp, err := client.Get(apiURL)
 	if err != nil {
-		return fmt.Errorf("failed to fetch download URL: %w", err)
+		return fmt.Errorf("failed to fetch download URL: %w", withoutRequestURL(err))
 	}
 	defer resp.Body.Close()
 
@@ -364,7 +346,9 @@ func (b *Book) Download(secretKey, folderPath string, timeout time.Duration) err
 		if readErr != nil {
 			return fmt.Errorf("API request failed with status %d: %s", resp.StatusCode, resp.Status)
 		}
-		return fmt.Errorf("API request failed with status %d: %s (body: %s)", resp.StatusCode, resp.Status, string(body))
+		var failure fastDownloadResponse
+		_ = json.Unmarshal(body, &failure)
+		return fmt.Errorf("API request failed with status %d: %s", resp.StatusCode, failure.Error)
 	}
 
 	var apiResp fastDownloadResponse
@@ -380,11 +364,11 @@ func (b *Book) Download(secretKey, folderPath string, timeout time.Duration) err
 	}
 
 	// Second API call: download the file
-	l.Info("Downloading file", zap.String("url", apiResp.DownloadURL))
+	l.Info("Downloading file", zap.String("hash", b.Hash))
 
 	downloadResp, err := client.Get(apiResp.DownloadURL)
 	if err != nil {
-		return fmt.Errorf("failed to download file: %w", err)
+		return fmt.Errorf("failed to download file: %w", withoutRequestURL(err))
 	}
 	defer downloadResp.Body.Close()
 
@@ -459,10 +443,7 @@ func LookupDOI(doi string, timeout time.Duration) (*Paper, error) {
 
 	// Phase 1: Visit /scidb/DOI which redirects to a search results page.
 	// Extract the MD5 hash from the first search result.
-	searchCollector := colly.NewCollector(
-		colly.UserAgent(BrowserUserAgent),
-	)
-	searchCollector.SetRequestTimeout(timeout)
+	searchCollector := newSearchCollector(timeout)
 
 	searchCollector.OnHTML("a[href^='/md5/']", func(e *colly.HTMLElement) {
 		if paper.Hash != "" {
@@ -501,10 +482,7 @@ func LookupDOI(doi string, timeout time.Duration) (*Paper, error) {
 	}
 
 	// Phase 2: Visit /md5/HASH to get paper details.
-	detailCollector := colly.NewCollector(
-		colly.UserAgent(BrowserUserAgent),
-	)
-	detailCollector.SetRequestTimeout(timeout)
+	detailCollector := newSearchCollector(timeout)
 
 	detailCollector.OnHTML("title", func(e *colly.HTMLElement) {
 		title := e.Text
